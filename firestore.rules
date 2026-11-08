@@ -1,0 +1,284 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function docPath(col, id) { return /databases/$(database)/documents/$(col)/$(id); }
+
+    function isMember(gid) { return signedIn() && exists(docPath('groupMembers', gid + '_' + uid())); }
+    function isOwner(gid) { return signedIn() && get(docPath('groups', gid)).data.ownerId == uid(); }
+
+    match /users/{userId}/{document=**} {
+      allow read, write: if signedIn() && uid() == userId;
+    }
+
+    match /classes/{classId} {
+      allow read: if signedIn() && resource.data.teacherId == uid();
+      allow create: if signedIn() && request.resource.data.teacherId == uid()
+        && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+      allow update: if signedIn() && resource.data.teacherId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+      allow delete: if signedIn() && resource.data.teacherId == uid();
+    }
+    match /classCodes/{code} {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.teacherId == uid()
+        && getAfter(docPath('classes', request.resource.data.classId)).data.teacherId == uid();
+      allow update: if signedIn() && resource.data.teacherId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+      allow delete: if signedIn() && resource.data.teacherId == uid();
+    }
+    match /members/{memberId} {
+      // Henüz var olmayan belgeyi okumak ("zaten üye miyim?" kontrolü) resource == null ile izinli olmalı; yoksa katılma reddedilir.
+      allow get: if signedIn() && resource == null;
+      allow get: if signedIn() && resource.data.teacherId == uid();
+      allow get: if signedIn() && resource.data.studentId == uid();
+      allow list: if signedIn() && resource.data.teacherId == uid();
+      allow list: if signedIn() && resource.data.studentId == uid();
+      allow create: if signedIn()
+        && request.resource.data.studentId == uid()
+        && memberId == request.resource.data.classId + '_' + uid()
+        && get(docPath('classCodes', request.resource.data.code)).data.classId == request.resource.data.classId
+        && get(docPath('classCodes', request.resource.data.code)).data.teacherId == request.resource.data.teacherId;
+      // Öğrenci adını değiştirirse yalnızca "studentName" güncellenir.
+      allow update: if signedIn() && resource.data.studentId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentName'])
+        && request.resource.data.studentName is string && request.resource.data.studentName.size() <= 40;
+      allow delete: if signedIn() && (resource.data.studentId == uid() || resource.data.teacherId == uid());
+
+      match /messages/{messageId} {
+        allow read: if signedIn() && (get(docPath('members', memberId)).data.teacherId == uid() || get(docPath('members', memberId)).data.studentId == uid());
+        allow create: if signedIn() && request.resource.data.senderId == uid()
+          && (get(docPath('members', memberId)).data.teacherId == uid() || get(docPath('members', memberId)).data.studentId == uid())
+          && request.resource.data.keys().hasOnly(['senderId', 'senderName', 'body', 'kind', 'createdAt'])
+          && request.resource.data.body is string
+          && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 1000;
+        allow delete: if signedIn() && (resource.data.senderId == uid() || get(docPath('members', memberId)).data.teacherId == uid());
+      }
+      match /programs/{programId} {
+        allow read: if signedIn() && (get(docPath('members', memberId)).data.teacherId == uid() || get(docPath('members', memberId)).data.studentId == uid());
+        allow create: if signedIn() && request.resource.data.teacherId == uid()
+          && get(docPath('members', memberId)).data.teacherId == uid()
+          && request.resource.data.studentId == get(docPath('members', memberId)).data.studentId
+          && request.resource.data.lessons is list && request.resource.data.lessons.size() <= 60;
+        allow update: if signedIn() && get(docPath('members', memberId)).data.studentId == uid()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saved']);
+        allow delete: if signedIn() && (get(docPath('members', memberId)).data.teacherId == uid() || get(docPath('members', memberId)).data.studentId == uid());
+      }
+    }
+    match /invites/{inviteId} {
+      allow read: if signedIn() && (resource.data.teacherId == uid()
+        || ('targetUid' in resource.data && resource.data.targetUid == uid())
+        || (request.auth.token.email != null && resource.data.target == request.auth.token.email.lower()));
+      allow create, update: if signedIn() && request.resource.data.teacherId == uid()
+        && request.resource.data.target is string && request.resource.data.target.size() <= 120
+        && get(docPath('classes', request.resource.data.classId)).data.teacherId == uid();
+      allow delete: if signedIn() && (resource.data.teacherId == uid()
+        || ('targetUid' in resource.data && resource.data.targetUid == uid())
+        || (request.auth.token.email != null && resource.data.target == request.auth.token.email.lower()));
+    }
+
+    // ----- Kullanıcı adı ve arkadaşlık -----
+    match /usernames/{name} {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.uid == uid() && name.matches('[a-z0-9_]{3,20}');
+      allow delete: if signedIn() && resource.data.uid == uid();
+    }
+    match /profiles/{userId} {
+      allow get: if signedIn();
+      allow create, update: if signedIn() && uid() == userId
+        && (!('username' in request.resource.data) || (request.resource.data.username is string && request.resource.data.username.matches('[a-z0-9_]{3,20}')))
+        && (!('name' in request.resource.data) || request.resource.data.name.size() <= 40);
+      allow delete: if signedIn() && uid() == userId;
+    }
+    match /friendRequests/{rid} {
+      allow get: if signedIn() && resource == null;
+      allow read: if signedIn() && (resource.data.fromUid == uid() || resource.data.toUid == uid());
+      allow create: if signedIn() && request.resource.data.fromUid == uid()
+        && request.resource.data.toUid is string && request.resource.data.toUid != uid()
+        && rid == request.resource.data.fromUid + '_' + request.resource.data.toUid;
+      allow delete: if signedIn() && (resource.data.fromUid == uid() || resource.data.toUid == uid());
+    }
+    match /rooms/{roomId} {
+      function pairId(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+      function addedUid() { return request.resource.data.uids.toSet().difference(resource.data.uids.toSet()).toList()[0]; }
+      function inRoom() { return signedIn() && uid() in get(docPath('rooms', roomId)).data.uids; }
+
+      // Üyeler okur; "arkadaşlarıma göster" açıksa kurucunun arkadaşları da odayı görüp katılabilir.
+      allow read: if signedIn() && (uid() in resource.data.uids
+        || (resource.data.openToFriends == true && exists(docPath('friendships', pairId(uid(), resource.data.hostUid)))));
+      // Yeni oda: yalnızca kurucuyla açılır; 4-8 öğrenci masası (sayı karşılaştırması int/float farkından etkilenmez).
+      allow create: if signedIn() && request.resource.data.hostUid == uid()
+        && request.resource.data.uids.size() == 1 && request.resource.data.uids[0] == uid()
+        && request.resource.data.capacity >= 4 && request.resource.data.capacity <= 8
+        && request.resource.data.allowTeacher is bool
+        && request.resource.data.openToFriends is bool;
+      // Üye yalnızca durumu (açık/kapalı) değiştirebilir.
+      allow update: if signedIn() && uid() in resource.data.uids
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      // Kurucu, arkadaşı olan birini tek seferde bir kişi ekleyebilir.
+      allow update: if signedIn() && uid() == resource.data.hostUid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uids'])
+        && request.resource.data.uids.size() == resource.data.uids.size() + 1
+        && request.resource.data.uids.size() <= resource.data.capacity + (resource.data.allowTeacher == true ? 1 : 0)
+        && request.resource.data.uids.hasAll(resource.data.uids)
+        && exists(docPath('friendships', pairId(uid(), addedUid())));
+      // Kurucunun arkadaşı, oda açık ve boş yer varsa kendini ekleyebilir.
+      allow update: if signedIn() && resource.data.openToFriends == true && resource.data.status == 'open'
+        && !(uid() in resource.data.uids)
+        && exists(docPath('friendships', pairId(uid(), resource.data.hostUid)))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uids'])
+        && request.resource.data.uids.size() == resource.data.uids.size() + 1
+        && request.resource.data.uids.size() <= resource.data.capacity + (resource.data.allowTeacher == true ? 1 : 0)
+        && request.resource.data.uids.hasAll(resource.data.uids)
+        && uid() in request.resource.data.uids;
+      allow delete: if signedIn() && uid() in resource.data.uids;
+      match /presence/{pid} {
+        allow read: if inRoom();
+        allow create, update: if inRoom() && pid == uid();
+        allow delete: if inRoom();
+      }
+      match /photos/{pid} {
+        allow read: if inRoom();
+        allow create, update: if inRoom() && pid == uid()
+          && request.resource.data.photo is string && request.resource.data.photo.size() < 400000;
+        allow delete: if inRoom();
+      }
+    }
+    match /friendships/{fid} {
+      allow get: if signedIn() && resource == null;
+      allow read: if signedIn() && uid() in resource.data.uids;
+      allow create: if signedIn() && request.resource.data.uids.size() == 2
+        && request.resource.data.uids[0] < request.resource.data.uids[1]
+        && fid == request.resource.data.uids[0] + '_' + request.resource.data.uids[1]
+        && uid() in request.resource.data.uids
+        && (
+          (get(docPath('friendRequests', request.resource.data.uids[0] + '_' + request.resource.data.uids[1])).data.toUid == uid())
+          || (get(docPath('friendRequests', request.resource.data.uids[1] + '_' + request.resource.data.uids[0])).data.toUid == uid())
+        );
+      allow delete: if signedIn() && uid() in resource.data.uids;
+    }
+    match /requests/{requestId} {
+      allow read: if signedIn() && (resource.data.teacherId == uid() || resource.data.studentId == uid());
+      allow create: if signedIn() && request.resource.data.teacherId == uid()
+        && request.resource.data.status == 'pending'
+        && exists(docPath('members', request.resource.data.classId + '_' + request.resource.data.studentId))
+        && get(docPath('members', request.resource.data.classId + '_' + request.resource.data.studentId)).data.teacherId == uid();
+      allow update: if signedIn() && resource.data.studentId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'report'])
+        && request.resource.data.status in ['approved', 'declined'];
+      allow delete: if signedIn() && (resource.data.studentId == uid() || resource.data.teacherId == uid());
+    }
+
+    match /groups/{groupId} {
+      allow get: if signedIn() && (groupId.matches('school_.*') || isMember(groupId) || isOwner(groupId));
+      allow create: if signedIn() && request.resource.data.name is string && request.resource.data.name.size() <= 80 && (
+        (request.resource.data.ownerId == uid() && request.resource.data.kind in ['class', 'student', 'dm'])
+        || (request.resource.data.ownerId == null && request.resource.data.kind == 'school' && groupId.matches('school_.*')));
+      allow delete: if isOwner(groupId);
+      // Grubu kuran: adı ve fotoğrafı değiştirebilir.
+      allow update: if isOwner(groupId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photo'])
+        && request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 80
+        && (!('photo' in request.resource.data) || (request.resource.data.photo is string && request.resource.data.photo.size() < 400000));
+
+      match /messages/{messageId} {
+        allow read: if isMember(groupId);
+        allow create: if isMember(groupId)
+          && request.resource.data.senderId == uid()
+          && request.resource.data.keys().hasOnly(['senderId', 'senderName', 'body', 'createdAt'])
+          && request.resource.data.body is string
+          && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 1000;
+        // Herkes kendi mesajını siler. Sınıf grubunda grubu kuran öğretmen, okul grubunda "öğretmen" rolündeki üye herkesinkini silebilir.
+        // Not: rol uygulamada kendi beyanıyla seçildiği için okul grubundaki öğretmen yetkisi doğrulanmış öğretmen anlamına gelmez.
+        allow delete: if signedIn() && (resource.data.senderId == uid()
+          || (isOwner(groupId) && get(docPath('groups', groupId)).data.kind == 'class')
+          || (groupId.matches('school_.*') && get(docPath('groupMembers', groupId + '_' + uid())).data.role == 'teacher'));
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isMember(groupId) || isOwner(groupId);
+        allow create: if isOwner(groupId) && request.resource.data.teacherId == uid()
+          && request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 100;
+        allow delete: if isOwner(groupId);
+        match /done/{doneUid} {
+          allow get: if signedIn() && (doneUid == uid() || isOwner(groupId));
+          allow list: if isOwner(groupId);
+          allow create, update, delete: if signedIn() && doneUid == uid() && isMember(groupId);
+        }
+      }
+
+      match /reports/{reportId} {
+        allow create: if isMember(groupId) && request.resource.data.reporterId == uid();
+        allow read: if signedIn() && (isOwner(groupId) || resource.data.reporterId == uid());
+        allow delete: if isOwner(groupId);
+      }
+    }
+    match /groupCodes/{code} {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerId == uid()
+        && getAfter(docPath('groups', request.resource.data.groupId)).data.ownerId == uid();
+      allow delete: if signedIn() && resource.data.ownerId == uid();
+      allow update: if signedIn() && resource.data.ownerId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+    }
+    match /groupMembers/{memberId} {
+      // resource == null: "zaten üye miyim?" kontrolü henüz var olmayan belgeyi okur; izin verilmezse gruba katılma reddedilir.
+      allow get: if signedIn() && resource == null;
+      allow get: if signedIn() && resource.data.userId == uid();
+      allow get: if signedIn() && isMember(resource.data.groupId);
+      allow list: if signedIn() && resource.data.userId == uid();
+      allow list: if signedIn() && isMember(resource.data.groupId);
+      allow create: if signedIn()
+        && request.resource.data.userId == uid()
+        && memberId == request.resource.data.groupId + '_' + uid()
+        && (
+          getAfter(docPath('groups', request.resource.data.groupId)).data.ownerId == uid()
+          || (request.resource.data.groupId.matches('school_.*') && getAfter(docPath('groups', request.resource.data.groupId)).data.kind == 'school')
+          || (request.resource.data.code is string
+              && get(docPath('groupCodes', request.resource.data.code)).data.groupId == request.resource.data.groupId));
+      // Üye yalnızca kendi kaydındaki "role" alanını güncelleyebilir (grupta öğretmen/öğrenci etiketi için).
+      allow update: if signedIn() && resource.data.userId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role'])
+        && request.resource.data.role in ['teacher', 'student'];
+      // Üye kendi kaydında yalnızca ad (userName), öğretmen görevi (title) ve branşı (branch) güncelleyebilir.
+      allow update: if signedIn() && resource.data.userId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userName', 'title', 'branch'])
+        && (!('userName' in request.resource.data) || (request.resource.data.userName is string && request.resource.data.userName.size() <= 40))
+        && (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 30))
+        && (!('branch' in request.resource.data) || (request.resource.data.branch is string && request.resource.data.branch.size() <= 30));
+      // Birebir sohbet (dm_<kişiA>_<kişiB>): iki kişiden biri, ikisinin üyelik kaydını birlikte oluşturabilir. Sohbet yalnızca bu iki kişiye açılır.
+      allow create: if signedIn()
+        && request.resource.data.kind == 'dm'
+        && request.resource.data.groupId.matches('dm_[A-Za-z0-9]+_[A-Za-z0-9]+')
+        && request.resource.data.groupId.split('_').size() == 3
+        && uid() in request.resource.data.groupId.split('_')
+        && request.resource.data.userId in request.resource.data.groupId.split('_')
+        && memberId == request.resource.data.groupId + '_' + request.resource.data.userId
+        && getAfter(docPath('groups', request.resource.data.groupId)).data.kind == 'dm';
+      // Grubu kuran, grubun yeni adını üyelik kayıtlarına yansıtır.
+      allow update: if signedIn() && isOwner(resource.data.groupId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+      allow delete: if signedIn() && (resource.data.userId == uid() || isOwner(resource.data.groupId));
+    }
+
+    match /reports/{reportId} {
+      allow create: if signedIn() && request.resource.data.reporterId == uid()
+        && request.resource.data.reason is string
+        && request.resource.data.body is string && request.resource.data.body.size() <= 500;
+      allow read, update, delete: if false;
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if signedIn() && request.resource.data.userId == uid()
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 5 && request.resource.data.body.size() <= 2000;
+      allow read, delete: if signedIn() && resource.data.userId == uid();
+    }
+  }
+}
